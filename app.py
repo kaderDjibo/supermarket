@@ -976,7 +976,7 @@ if st.session_state.branding["bg_css"]:
 
 page = st.sidebar.radio(
     "Menu",
-    ["POS", "Inventory", "Analytics", "Daily Reports", "Customers & Loans"],
+    ["POS", "Inventory", "Analytics", "Daily Reports", "Customers & Loans", "Settings"],
 )
 
 # Global low-stock alert for this store
@@ -1492,7 +1492,7 @@ elif page == "Daily Reports":
         st.info("For PDF, use your browser: Print → Save as PDF.")
 
 # ================= CUSTOMERS & LOANS PAGE =================
-else:  # Customers & Loans
+elif page == "Customers & Loans":
     st.title("Customers & Loans (Store Credit)")
 
     st.subheader("Add new customer")
@@ -1562,3 +1562,315 @@ else:  # Customers & Loans
             st.info("No loan transactions for this customer.")
         else:
             st.dataframe(history_df)
+
+# ================= SETTINGS PAGE =================
+elif page == "Settings":
+    st.title("Settings & Admin")
+
+    # ---- Create Admin User ----
+    st.subheader("Create Admin User")
+    st.write("Add a new staff member or admin user to the system.")
+    
+    with st.form("create_user"):
+        user_name = st.text_input("Full name")
+        user_username = st.text_input("Username")
+        user_password = st.text_input("Password", type="password")
+        user_password_confirm = st.text_input("Confirm password", type="password")
+        user_role = st.selectbox("Role", ["cashier", "manager", "admin"])
+        user_store = st.selectbox(
+            "Assign to store",
+            options=[f"{row['id']} - {row['name']}" for _, row in stores_df.iterrows()]
+        )
+        
+        submitted = st.form_submit_button("Create User")
+        
+        if submitted:
+            if not user_name or not user_username or not user_password:
+                st.error("Name, username, and password are required.")
+            elif user_password != user_password_confirm:
+                st.error("Passwords do not match.")
+            elif len(user_password) < 6:
+                st.error("Password must be at least 6 characters.")
+            else:
+                try:
+                    # Hash the password
+                    pwd_hash = hashlib.sha256(user_password.encode("utf-8")).hexdigest()
+                    store_id = int(user_store.split(" - ")[0])
+                    
+                    conn = get_connection()
+                    c = conn.cursor()
+                    c.execute(
+                        """
+                        INSERT INTO users (name, username, password_hash, role, store_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (user_name, user_username, pwd_hash, user_role, store_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    st.success(f"User '{user_username}' created successfully!")
+                except Exception as e:
+                    st.error(f"Error creating user: {e}")
+
+    st.markdown("---")
+
+    # ---- User List ----
+    st.subheader("Registered Users")
+    conn = get_connection()
+    users_df = pd.read_sql_query(
+        """
+        SELECT u.id, u.name, u.username, u.role, s.name as store_name
+        FROM users u
+        LEFT JOIN stores s ON u.store_id = s.id
+        """,
+        conn
+    )
+    conn.close()
+    
+    if not users_df.empty:
+        st.dataframe(users_df, use_container_width=True)
+    else:
+        st.info("No users registered yet.")
+
+    st.markdown("---")
+
+    # ---- Add Product ----
+    st.subheader("Add Product")
+    st.write("Add a new product to the inventory system.")
+    
+    with st.form("add_product_settings"):
+        prod_name = st.text_input("Product name")
+        prod_barcode = st.text_input("Barcode (must be unique)")
+        prod_price = st.number_input("Price", min_value=0.0, step=0.01)
+        prod_reorder = st.number_input("Reorder level", min_value=0, value=5, step=1)
+        
+        # Option to set initial stock for all stores
+        set_all_stores = st.checkbox("Set initial stock for all stores")
+        if set_all_stores:
+            initial_stock = st.number_input("Initial stock per store", min_value=0, step=1)
+        else:
+            initial_stock = 0
+        
+        submitted = st.form_submit_button("Add Product")
+        
+        if submitted:
+            if not prod_name or not prod_barcode:
+                st.error("Product name and barcode are required.")
+            else:
+                try:
+                    conn = get_connection()
+                    c = conn.cursor()
+                    
+                    # Insert product
+                    c.execute(
+                        """
+                        INSERT INTO products (name, barcode, price, reorder_level, is_active)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT(barcode)
+                        DO UPDATE SET
+                            name=excluded.name,
+                            price=excluded.price,
+                            reorder_level=excluded.reorder_level,
+                            is_active=1
+                        """,
+                        (prod_name, prod_barcode, prod_price, prod_reorder),
+                    )
+                    
+                    # Get the product ID
+                    c.execute("SELECT id FROM products WHERE barcode = ?", (prod_barcode,))
+                    pid = c.fetchone()[0]
+                    
+                    # Set stock for all stores or just current store
+                    if set_all_stores:
+                        for _, store in stores_df.iterrows():
+                            c.execute(
+                                """
+                                INSERT INTO stock_levels (store_id, product_id, quantity)
+                                VALUES (?, ?, ?)
+                                ON CONFLICT(store_id, product_id)
+                                DO UPDATE SET quantity = excluded.quantity
+                                """,
+                                (store['id'], pid, initial_stock),
+                            )
+                    else:
+                        c.execute(
+                            """
+                            INSERT INTO stock_levels (store_id, product_id, quantity)
+                            VALUES (?, ?, 0)
+                            ON CONFLICT(store_id, product_id)
+                            DO UPDATE SET quantity = 0
+                            """,
+                            (current_store_id, pid),
+                        )
+                    
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Product '{prod_name}' added successfully!")
+                except Exception as e:
+                    st.error(f"Error adding product: {e}")
+
+    st.markdown("---")
+
+    # ---- Product List ----
+    st.subheader("Product Catalog")
+    all_products = get_all_products()
+    if all_products.empty:
+        st.info("No products in the system yet.")
+    else:
+        st.dataframe(all_products, use_container_width=True)
+
+# ================= SETTINGS PAGE =================
+elif page == "Settings":
+    st.title("Settings & Admin")
+
+    # ---- Create Admin User ----
+    st.subheader("Create Admin User")
+    st.write("Add a new staff member or admin user to the system.")
+    
+    with st.form("create_user"):
+        user_name = st.text_input("Full name")
+        user_username = st.text_input("Username")
+        user_password = st.text_input("Password", type="password")
+        user_password_confirm = st.text_input("Confirm password", type="password")
+        user_role = st.selectbox("Role", ["cashier", "manager", "admin"])
+        user_store = st.selectbox(
+            "Assign to store",
+            options=[f"{row['id']} - {row['name']}" for _, row in stores_df.iterrows()]
+        )
+        
+        submitted = st.form_submit_button("Create User")
+        
+        if submitted:
+            if not user_name or not user_username or not user_password:
+                st.error("Name, username, and password are required.")
+            elif user_password != user_password_confirm:
+                st.error("Passwords do not match.")
+            elif len(user_password) < 6:
+                st.error("Password must be at least 6 characters.")
+            else:
+                try:
+                    # Hash the password
+                    pwd_hash = hashlib.sha256(user_password.encode("utf-8")).hexdigest()
+                    store_id = int(user_store.split(" - ")[0])
+                    
+                    conn = get_connection()
+                    c = conn.cursor()
+                    c.execute(
+                        """
+                        INSERT INTO users (name, username, password_hash, role, store_id)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (user_name, user_username, pwd_hash, user_role, store_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                    st.success(f"User '{user_username}' created successfully!")
+                except Exception as e:
+                    st.error(f"Error creating user: {e}")
+
+    st.markdown("---")
+
+    # ---- User List ----
+    st.subheader("Registered Users")
+    conn = get_connection()
+    users_df = pd.read_sql_query(
+        """
+        SELECT u.id, u.name, u.username, u.role, s.name as store_name
+        FROM users u
+        LEFT JOIN stores s ON u.store_id = s.id
+        """,
+        conn
+    )
+    conn.close()
+    
+    if not users_df.empty:
+        st.dataframe(users_df, use_container_width=True)
+    else:
+        st.info("No users registered yet.")
+
+    st.markdown("---")
+
+    # ---- Add Product ----
+    st.subheader("Add Product")
+    st.write("Add a new product to the inventory system.")
+    
+    with st.form("add_product_settings"):
+        prod_name = st.text_input("Product name")
+        prod_barcode = st.text_input("Barcode (must be unique)")
+        prod_price = st.number_input("Price", min_value=0.0, step=0.01)
+        prod_reorder = st.number_input("Reorder level", min_value=0, value=5, step=1)
+        
+        # Option to set initial stock for all stores
+        set_all_stores = st.checkbox("Set initial stock for all stores")
+        if set_all_stores:
+            initial_stock = st.number_input("Initial stock per store", min_value=0, step=1)
+        else:
+            initial_stock = 0
+        
+        submitted = st.form_submit_button("Add Product")
+        
+        if submitted:
+            if not prod_name or not prod_barcode:
+                st.error("Product name and barcode are required.")
+            else:
+                try:
+                    conn = get_connection()
+                    c = conn.cursor()
+                    
+                    # Insert product
+                    c.execute(
+                        """
+                        INSERT INTO products (name, barcode, price, reorder_level, is_active)
+                        VALUES (?, ?, ?, ?, 1)
+                        ON CONFLICT(barcode)
+                        DO UPDATE SET
+                            name=excluded.name,
+                            price=excluded.price,
+                            reorder_level=excluded.reorder_level,
+                            is_active=1
+                        """,
+                        (prod_name, prod_barcode, prod_price, prod_reorder),
+                    )
+                    
+                    # Get the product ID
+                    c.execute("SELECT id FROM products WHERE barcode = ?", (prod_barcode,))
+                    pid = c.fetchone()[0]
+                    
+                    # Set stock for all stores or just current store
+                    if set_all_stores:
+                        for _, store in stores_df.iterrows():
+                            c.execute(
+                                """
+                                INSERT INTO stock_levels (store_id, product_id, quantity)
+                                VALUES (?, ?, ?)
+                                ON CONFLICT(store_id, product_id)
+                                DO UPDATE SET quantity = excluded.quantity
+                                """,
+                                (store['id'], pid, initial_stock),
+                            )
+                    else:
+                        c.execute(
+                            """
+                            INSERT INTO stock_levels (store_id, product_id, quantity)
+                            VALUES (?, ?, 0)
+                            ON CONFLICT(store_id, product_id)
+                            DO UPDATE SET quantity = 0
+                            """,
+                            (current_store_id, pid),
+                        )
+                    
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Product '{prod_name}' added successfully!")
+                except Exception as e:
+                    st.error(f"Error adding product: {e}")
+
+    st.markdown("---")
+
+    # ---- Product List ----
+    st.subheader("Product Catalog")
+    all_products = get_all_products()
+    if all_products.empty:
+        st.info("No products in the system yet.")
+    else:
+        st.dataframe(all_products, use_container_width=True)
